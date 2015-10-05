@@ -1,0 +1,84 @@
+import org.apache.spark.{SparkContext,SparkConf}
+import scala.io
+import org.apache.spark.rdd.RDD
+
+//Reading the content of files and directories
+// class definition for the website and jdist calculation to be stored in the database
+case class DataSet(dataSetName: String, jDist: Float)
+
+// Method to compute Jaccard distance given RDDs of two sets
+def computeJDist (set1 :RDD[String],set2:RDD[String] ) : Float = {
+    val totalWordCount :Float= (set1 union set2).distinct().count()
+    val set2map = set2.map(word => (word,1))
+    val set1map = set1.map(word => (word,1))
+    val commonWordCount :Float = (set2map union set1map).reduceByKey(_+_).filter{case (key, value) => value == 2}.count()
+    
+    return 1-(commonWordCount/totalWordCount)
+}
+
+//Define data sources
+val userSource = "file:////root//AutomatedDetectionSys//UserData//*"
+val filterWordsSource = "file:////root//AutomatedDetectionSys//Blacklist//Jdist_Vocab.txt"
+val massDataSource = "file:////root//AutomatedDetectionSys//MassData//*"
+
+// Read the actual words
+val userDataRDD = sc.parallelize(sc.textFile(userSource).filter(sent => sent.length>1).map(sent => sent.toLowerCase().replaceAll("\n","").replaceAll("\\.","").replaceAll("\\?","").replaceAll("\\!","").split(" ")).reduce(_++_))
+println("\nPrinting the user dataset")
+userDataRDD.collect()
+
+/*println("\nPrinting the word count")
+textRDD2.map(word => (word, 1)).reduceByKey(_+_).collect()*/
+
+
+// Read the filter words
+val filterDataRDD = sc.parallelize(sc.textFile(filterWordsSource).filter(sent => sent.length>1).map(sent => sent.toLowerCase().replaceAll("\n","").replaceAll("\\.","").replaceAll("\\?","").replaceAll("\\!","").split(" ")).reduce(_++_))
+println("\nPrinting the filter dataset")
+filterDataRDD.collect()
+
+// Filter words out of the actual word list
+val filteredUserDataRDD = userDataRDD.subtract(filterDataRDD)
+/*println("\nPrinting the filtered word count")
+filteredTextRDD.map(word => (word, 1)).reduceByKey(_+_).collect()*/
+
+//Building the dictionary
+val dictionary = filteredUserDataRDD.distinct()
+println("\nPrinting the dictionary dataset")
+dictionary.collect()
+
+//Read the mass data load
+val massDataPairRDD = sc.wholeTextFiles(massDataSource).mapValues (fileContent => fileContent.toLowerCase().replaceAll("\n","").replaceAll("\\.","").replaceAll("\\?","").replaceAll("\\!","").split(" "))
+
+//Add new code here with for loop
+val massDataWithoutIndex = massDataPairRDD.values.zipWithIndex
+val massDataRDD = massDataWithoutIndex.map{case (k,v) => (v,k)}
+val massFNameWithoutIndex = massDataPairRDD.keys.zipWithIndex
+val massFNameRDD = massFNameWithoutIndex.map{case (k,v) => (v,k)}
+var scoreList = List[Float]()
+for (i <- 0 to massDataPairRDD.values.count().toInt -1 ){
+    
+    val contentRDD :RDD[String] = sc.parallelize(sc.parallelize(massDataRDD.lookup(i)).reduce(_++_))
+    
+    //Build vocabulary of mass data set
+    val filteredMassDataRDD = contentRDD.subtract(filterDataRDD)
+    val massDataVocab = filteredMassDataRDD.distinct()
+    println("\nPrinting the mass data vocab")
+    massDataVocab.collect()
+    
+    //Print the Jdist score
+    var score = computeJDist(dictionary,massDataVocab)
+    
+    println("\nJaccard distance of "+massFNameRDD.lookup(i)+" = "+score)
+    scoreList = score :: scoreList
+}
+
+/*massDataVocab.count()
+dictionary.count()
+total.count()
+total.distinct().count()*/
+
+//Create DataSet Object
+val scoreRDD = sc.parallelize(scoreList.reverse).zipWithIndex.map{case (k,v) => (v,k)}
+val resultRDD = massFNameRDD.join(scoreRDD)
+resultRDD.collect()
+val dataSet = resultRDD.mapValues( fSet => DataSet(fSet._1,fSet._2)).values.toDF()
+dataSet.registerTempTable("jDistTab")
